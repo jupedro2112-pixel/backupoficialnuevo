@@ -1382,12 +1382,8 @@ app.get('/api/users/me', authMiddleware, async (req, res) => {
 // Cambiar contraseña
 app.post('/api/auth/change-password', authMiddleware, authLimiter, async (req, res) => {
   try {
-    const { currentPassword, newPassword, whatsapp, closeAllSessions } = req.body;
+    const { newPassword, whatsapp, closeAllSessions } = req.body;
 
-    if (!currentPassword) {
-      return res.status(400).json({ error: 'La contraseña actual es requerida' });
-    }
-    
     // Buscar por 'id' primero, luego por '_id' como fallback
     let user = await User.findOne({ id: req.user.userId });
     
@@ -1401,12 +1397,6 @@ app.post('/api/auth/change-password', authMiddleware, authLimiter, async (req, r
     
     if (!user) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
-    }
-
-    // Verificar contraseña actual antes de permitir el cambio
-    const isValidCurrent = await bcrypt.compare(currentPassword, user.password);
-    if (!isValidCurrent) {
-      return res.status(401).json({ error: 'Contraseña actual incorrecta' });
     }
 
     if (!newPassword || newPassword.length < 6) {
