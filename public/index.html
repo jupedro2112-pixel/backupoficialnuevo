@@ -965,6 +965,8 @@
             }
             _notifInitializing = true;
 
+            try {
+
             // Detectar dispositivo y modo de ejecución
             const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
             const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
@@ -978,7 +980,6 @@
             // contextos y generar tokens inválidos en el backend.
             if (!isStandalone) {
                 console.log('[FCM] Modo browser detectado. Registro de push omitido (solo PWA instalada).');
-                _notifInitializing = false;
                 return;
             }
 
@@ -1143,6 +1144,12 @@
             } catch (error) {
                 console.error('[FCM] ❌ Error al inicializar notificaciones:', error);
                 console.error('[FCM] Stack:', error.stack);
+            } finally {
+                _notifInitializing = false;
+            }
+
+            } catch (err) {
+                console.error('[FCM] Error en initNotifications:', err);
             } finally {
                 _notifInitializing = false;
             }
