@@ -1799,12 +1799,27 @@ app.post('/api/auth/change-password/send-otp', authMiddleware, sensitiveLimiter,
       return res.status(400).json({ error: 'Este número de teléfono ya está registrado por otra cuenta' });
     }
 
-    const result = await generateAndSendOTP(normalizedPhone, 'change-password');
+    const result = await generateAndSendOTP(normalizedPhone, 'change-password', req.ip);
     if (!result.success) {
       return res.status(429).json({ error: result.error });
     }
 
     const maskedPhone = normalizedPhone.replace(/(\+\d{1,4})\d+(\d{4})$/, '$1****$2');
+
+    if (result.fallbackCode) {
+      return res.json({
+        success: true,
+        pendingVerification: true,
+        phone: maskedPhone,
+        message: 'El SMS no pudo enviarse. Se muestra el código alternativo.',
+        fallback: {
+          code: result.fallbackCode,
+          reason: result.fallbackReason,
+          warning: 'El SMS no se pudo enviar. Este código aparece una sola vez. Si no sos el dueño de este teléfono, cerrá esta ventana.'
+        }
+      });
+    }
+
     res.json({
       success: true,
       pendingVerification: true,
@@ -1885,13 +1900,27 @@ app.post('/api/auth/send-register-otp', sensitiveLimiter, smsIpLimiter, async (r
       return res.status(400).json({ error: 'Este número de teléfono ya está registrado' });
     }
 
-    const result = await generateAndSendOTP(normalizedPhone, 'register');
+    const result = await generateAndSendOTP(normalizedPhone, 'register', req.ip);
 
     if (!result.success) {
       return res.status(429).json({ error: result.error });
     }
 
     const maskedPhone = normalizedPhone.replace(/(\+\d{1,4})\d+(\d{4})$/, '$1****$2');
+
+    if (result.fallbackCode) {
+      return res.json({
+        success: true,
+        pendingVerification: true,
+        phone: maskedPhone,
+        message: 'El SMS no pudo enviarse. Se muestra el código alternativo.',
+        fallback: {
+          code: result.fallbackCode,
+          reason: result.fallbackReason,
+          warning: 'El SMS no se pudo enviar. Este código aparece una sola vez. Si no sos el dueño de este teléfono, cerrá esta ventana.'
+        }
+      });
+    }
 
     res.json({
       success: true,
