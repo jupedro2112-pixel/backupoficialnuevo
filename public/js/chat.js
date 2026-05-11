@@ -345,6 +345,97 @@ VIP.chat = (function () {
         }
     }
 
+    function compressImage(file, { maxDim = 1600, quality = 0.85 } = {}) {
+        return new Promise((resolve, reject) => {
+            const url = URL.createObjectURL(file);
+            const img = new Image();
+            img.onload = () => {
+                URL.revokeObjectURL(url);
+                let { width, height } = img;
+                if (width > maxDim || height > maxDim) {
+                    if (width >= height) {
+                        height = Math.round(height * (maxDim / width));
+                        width = maxDim;
+                    } else {
+                        width = Math.round(width * (maxDim / height));
+                        height = maxDim;
+                    }
+                }
+                const canvas = document.createElement('canvas');
+                canvas.width = width;
+                canvas.height = height;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(img, 0, 0, width, height);
+                try {
+                    resolve(canvas.toDataURL('image/jpeg', quality));
+                } catch (err) {
+                    reject(err);
+                }
+            };
+            img.onerror = () => {
+                URL.revokeObjectURL(url);
+                reject(new Error('No se pudo decodificar la imagen'));
+            };
+            img.src = url;
+        });
+    }
+
+    function readAsDataUrl(file) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = (e) => resolve(e.target.result);
+            reader.onerror = () => reject(new Error('No se pudo leer el archivo'));
+            reader.readAsDataURL(file);
+        });
+    }
+
+    function removeTempMessage(tempId) {
+        const el = document.querySelector(`[data-temp-id="${tempId}"]`);
+        if (el) el.remove();
+    }
+
+    async function parseErrorMessage(response, fallback) {
+        try {
+            const body = await response.json();
+            if (body && body.error) return body.error;
+        } catch (_) {}
+        return fallback || `Error ${response.status}`;
+    }
+
+    async function sendMediaMessage({ dataUrl, fileType, fileLabel, tempId }) {
+        const tempMessage = {
+            id: tempId,
+            senderId: VIP.state.currentUser?.id || 'me',
+            senderUsername: VIP.state.currentUser?.username || 'Yo',
+            senderRole: 'user',
+            content: dataUrl,
+            timestamp: new Date(),
+            type: fileType
+        };
+        addMessageToChat(tempMessage);
+        scrollToBottom();
+
+        const response = await fetch(`${VIP.config.API_URL}/api/messages/send`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${VIP.state.currentToken}`
+            },
+            body: JSON.stringify({ content: dataUrl, type: fileType })
+        });
+
+        if (!response.ok) {
+            removeTempMessage(tempId);
+            const errMsg = await parseErrorMessage(response, `No se pudo enviar ${fileLabel.toLowerCase()}`);
+            VIP.ui.showToast(`${fileLabel}: ${errMsg}`, 'error');
+            return false;
+        }
+
+        loadMessages();
+        VIP.ui.showToast(`${fileLabel} enviada`, 'success');
+        return true;
+    }
+
     async function handleFileSelect(e) {
         const file = e.target.files[0];
         if (!file) return;
@@ -353,61 +444,41 @@ VIP.chat = (function () {
         const isVideo = file.type.startsWith('video/');
         if (!isImage && !isVideo) {
             VIP.ui.showToast('Solo se permiten imágenes o videos', 'error');
+            e.target.value = '';
             return;
         }
-        if (file.size > 100 * 1024 * 1024) {
-            VIP.ui.showToast('El archivo es muy grande. Máximo 100MB', 'error');
+        if (isImage && file.size > 30 * 1024 * 1024) {
+            VIP.ui.showToast('La imagen es muy grande. Máximo 30 MB', 'error');
+            e.target.value = '';
+            return;
+        }
+        if (isVideo && file.size > 3.5 * 1024 * 1024) {
+            VIP.ui.showToast('El video es muy grande. Máximo 3.5 MB', 'error');
+            e.target.value = '';
             return;
         }
 
         const fileType = isVideo ? 'video' : 'image';
         const fileLabel = isVideo ? '🎥 Video' : '📸 Imagen';
+        const tempId = 'temp-' + fileType + '-' + Date.now();
 
         const sendingIndicator = document.getElementById('sendingIndicator');
         if (sendingIndicator) sendingIndicator.style.display = 'block';
 
-        const reader = new FileReader();
-        reader.onload = async (event) => {
-            try {
-                const tempMessage = {
-                    id: 'temp-' + fileType + '-' + Date.now(),
-                    senderId: VIP.state.currentUser?.id || 'me',
-                    senderUsername: VIP.state.currentUser?.username || 'Yo',
-                    senderRole: 'user',
-                    content: event.target.result,
-                    timestamp: new Date(),
-                    type: fileType
-                };
-                addMessageToChat(tempMessage);
-                scrollToBottom();
+        try {
+            const dataUrl = isImage
+                ? await compressImage(file)
+                : await readAsDataUrl(file);
 
-                const response = await fetch(`${VIP.config.API_URL}/api/messages/send`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${VIP.state.currentToken}`
-                    },
-                    body: JSON.stringify({ content: event.target.result, type: fileType })
-                });
-
-                if (response.ok) {
-                    loadMessages();
-                    VIP.ui.showToast(`${fileLabel} enviada`, 'success');
-                }
-            } catch (error) {
-                console.error('Error enviando archivo:', error);
-                VIP.ui.showToast('Error al enviar archivo', 'error');
-            } finally {
-                if (sendingIndicator) sendingIndicator.style.display = 'none';
-                e.target.value = '';
-            }
-        };
-        reader.onerror = () => {
-            VIP.ui.showToast('Error al leer el archivo', 'error');
+            await sendMediaMessage({ dataUrl, fileType, fileLabel, tempId });
+        } catch (error) {
+            console.error('Error enviando archivo:', error);
+            removeTempMessage(tempId);
+            VIP.ui.showToast(`Error al enviar ${fileLabel.toLowerCase()}`, 'error');
+        } finally {
             if (sendingIndicator) sendingIndicator.style.display = 'none';
             e.target.value = '';
-        };
-        reader.readAsDataURL(file);
+        }
     }
 
     async function handlePaste(e) {
@@ -415,61 +486,31 @@ VIP.chat = (function () {
         if (!items) return;
 
         for (const item of items) {
-            if (item.type.startsWith('image/')) {
-                e.preventDefault();
-                const file = item.getAsFile();
-                if (!file) continue;
+            if (!item.type.startsWith('image/')) continue;
+            e.preventDefault();
+            const file = item.getAsFile();
+            if (!file) continue;
 
-                if (file.size > 100 * 1024 * 1024) {
-                    VIP.ui.showToast('La imagen es muy grande. Máximo 100MB', 'error');
-                    return;
-                }
-
-                const sendingIndicator = document.getElementById('sendingIndicator');
-                if (sendingIndicator) sendingIndicator.style.display = 'block';
-
-                const reader = new FileReader();
-                reader.onload = async (event) => {
-                    try {
-                        const tempMessage = {
-                            id: 'temp-image-' + Date.now(),
-                            senderId: VIP.state.currentUser?.id || 'me',
-                            senderUsername: VIP.state.currentUser?.username || 'Yo',
-                            senderRole: 'user',
-                            content: event.target.result,
-                            timestamp: new Date(),
-                            type: 'image'
-                        };
-                        addMessageToChat(tempMessage);
-                        scrollToBottom();
-
-                        const response = await fetch(`${VIP.config.API_URL}/api/messages/send`, {
-                            method: 'POST',
-                            headers: {
-                                'Content-Type': 'application/json',
-                                'Authorization': `Bearer ${VIP.state.currentToken}`
-                            },
-                            body: JSON.stringify({ content: event.target.result, type: 'image' })
-                        });
-
-                        if (response.ok) {
-                            loadMessages();
-                            VIP.ui.showToast('📸 Imagen enviada', 'success');
-                        }
-                    } catch (error) {
-                        console.error('Error enviando imagen pegada:', error);
-                        VIP.ui.showToast('Error al enviar imagen', 'error');
-                    } finally {
-                        if (sendingIndicator) sendingIndicator.style.display = 'none';
-                    }
-                };
-                reader.onerror = () => {
-                    VIP.ui.showToast('Error al leer la imagen', 'error');
-                    if (sendingIndicator) sendingIndicator.style.display = 'none';
-                };
-                reader.readAsDataURL(file);
-                break;
+            if (file.size > 30 * 1024 * 1024) {
+                VIP.ui.showToast('La imagen es muy grande. Máximo 30 MB', 'error');
+                return;
             }
+
+            const tempId = 'temp-image-' + Date.now();
+            const sendingIndicator = document.getElementById('sendingIndicator');
+            if (sendingIndicator) sendingIndicator.style.display = 'block';
+
+            try {
+                const dataUrl = await compressImage(file);
+                await sendMediaMessage({ dataUrl, fileType: 'image', fileLabel: '📸 Imagen', tempId });
+            } catch (error) {
+                console.error('Error enviando imagen pegada:', error);
+                removeTempMessage(tempId);
+                VIP.ui.showToast('Error al enviar imagen', 'error');
+            } finally {
+                if (sendingIndicator) sendingIndicator.style.display = 'none';
+            }
+            break;
         }
     }
 
