@@ -1544,67 +1544,129 @@ async function sendMessage() {
     socket.emit('stop_typing', { receiverId: selectedUserId });
 }
 
+// CORREGIDO: Convertir archivo a base64
+function fileToBase64(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error('No se pudo leer el archivo'));
+        reader.readAsDataURL(file);
+    });
+}
+
+// Comprime una imagen via Canvas: max 1600px lado mayor, JPEG q0.85.
+// Necesario porque el endpoint rechaza base64 > 5MB.
+function compressImageFile(file, { maxDim = 1600, quality = 0.85 } = {}) {
+    return new Promise((resolve, reject) => {
+        const url = URL.createObjectURL(file);
+        const img = new Image();
+        img.onload = () => {
+            URL.revokeObjectURL(url);
+            let { width, height } = img;
+            if (width > maxDim || height > maxDim) {
+                if (width >= height) {
+                    height = Math.round(height * (maxDim / width));
+                    width = maxDim;
+                } else {
+                    width = Math.round(width * (maxDim / height));
+                    height = maxDim;
+                }
+            }
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, width, height);
+            try {
+                resolve(canvas.toDataURL('image/jpeg', quality));
+            } catch (err) {
+                reject(err);
+            }
+        };
+        img.onerror = () => {
+            URL.revokeObjectURL(url);
+            reject(new Error('No se pudo decodificar la imagen'));
+        };
+        img.src = url;
+    });
+}
+
+function removeTempMessageEl(tempId) {
+    // admin's addMessageToChat stores the message id in data-messageid (one word)
+    const el = document.querySelector(`[data-messageid="${tempId}"]`);
+    if (el) el.remove();
+}
+
+async function parseFetchError(response, fallback) {
+    try {
+        const body = await response.json();
+        if (body && body.error) return body.error;
+    } catch (_) {}
+    return fallback || `Error ${response.status}`;
+}
+
 // Manejar selección de imagen o video
 async function handleImageSelect(e) {
     const file = e.target.files[0];
     if (!file || !selectedUserId) return;
-    
-    // Validar tipo de archivo: imágenes y videos
+
     const isImage = file.type.startsWith('image/');
     const isVideo = file.type.startsWith('video/');
     if (!isImage && !isVideo) {
         showToast('❌ Solo se permiten imágenes o videos', 'error');
+        e.target.value = '';
         return;
     }
-    
-    // Límite de 100 MB para imágenes y videos
-    if (file.size > 100 * 1024 * 1024) {
-        showToast('❌ El archivo es demasiado grande (máx 100 MB)', 'error');
+    if (isImage && file.size > 30 * 1024 * 1024) {
+        showToast('❌ La imagen es muy grande (máx 30 MB)', 'error');
+        e.target.value = '';
         return;
     }
-    
-    // Mostrar indicador de envío
+    // Videos no se comprimen en el navegador: el server rechaza base64 > 5MB
+    if (isVideo && file.size > 3.5 * 1024 * 1024) {
+        showToast('❌ El video es muy grande (máx 3.5 MB)', 'error');
+        e.target.value = '';
+        return;
+    }
+
     const sendingIndicator = document.getElementById('sendingIndicator');
-    if (sendingIndicator) {
-        sendingIndicator.classList.remove('hidden');
-    }
-    
+    if (sendingIndicator) sendingIndicator.classList.remove('hidden');
+
     const fileType = isVideo ? 'video' : 'image';
     const fileLabel = isVideo ? '🎥 Video' : '📸 Imagen';
+    const tempId = 'temp-' + fileType + '-' + Date.now();
 
     try {
-        // Convertir a base64
-        const base64File = await fileToBase64(file);
-        
-        // Enviar vía socket
+        const dataUrl = isImage
+            ? await compressImageFile(file)
+            : await fileToBase64(file);
+
+        const tempMessage = {
+            id: tempId,
+            senderId: currentAdmin.userId,
+            senderUsername: currentAdmin.username,
+            senderRole: 'admin',
+            content: dataUrl,
+            timestamp: new Date(),
+            type: fileType
+        };
+        addMessageToChat(tempMessage, true);
+        scrollToBottom();
+
         if (socket && socket.connected) {
             socket.emit('send_message', {
-                content: base64File,
+                content: dataUrl,
                 receiverId: selectedUserId,
                 type: fileType
             });
-            
-            // Mostrar inmediatamente (optimistic UI)
-            const tempMessage = {
-                id: 'temp-' + fileType + '-' + Date.now(),
-                senderId: currentAdmin.userId,
-                senderUsername: currentAdmin.username,
-                senderRole: 'admin',
-                content: base64File,
-                timestamp: new Date(),
-                type: fileType
-            };
-            addMessageToChat(tempMessage, true);
-            scrollToBottom();
-            
+
             sendPushNotification(selectedUserId, {
                 type: fileType,
                 content: fileLabel
             });
-            
+
             showToast(`✅ ${fileLabel} enviada`, 'success');
         } else {
-            // Fallback a REST API
             const response = await fetch(`${API_URL}/api/messages/send`, {
                 method: 'POST',
                 headers: {
@@ -1612,38 +1674,30 @@ async function handleImageSelect(e) {
                     'Authorization': `Bearer ${currentToken}`
                 },
                 body: JSON.stringify({
-                    content: base64File,
+                    content: dataUrl,
                     receiverId: selectedUserId,
                     type: fileType
                 })
             });
-            
-            if (!response.ok) throw new Error('Failed to send file');
-            
+
+            if (!response.ok) {
+                removeTempMessageEl(tempId);
+                const errMsg = await parseFetchError(response, `No se pudo enviar ${fileLabel.toLowerCase()}`);
+                showToast(`❌ ${fileLabel}: ${errMsg}`, 'error');
+                return;
+            }
+
             showToast(`✅ ${fileLabel} enviada`, 'success');
             loadMessages(selectedUserId, true);
         }
     } catch (error) {
         console.error('Error sending file:', error);
-        showToast('❌ Error al enviar archivo', 'error');
+        removeTempMessageEl(tempId);
+        showToast(`❌ Error al enviar ${fileLabel.toLowerCase()}`, 'error');
     } finally {
-        // Ocultar indicador de envío
-        if (sendingIndicator) {
-            sendingIndicator.classList.add('hidden');
-        }
-        // Limpiar input
+        if (sendingIndicator) sendingIndicator.classList.add('hidden');
         e.target.value = '';
     }
-}
-
-// CORREGIDO: Convertir archivo a base64
-function fileToBase64(file) {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(reader.result);
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-    });
 }
 
 // Pegar imagen con Ctrl+V desde portapapeles (escritorio)
@@ -1653,64 +1707,70 @@ async function handleAdminPaste(e) {
     if (!items) return;
 
     for (const item of items) {
-        if (item.type.startsWith('image/')) {
-            e.preventDefault();
-            const file = item.getAsFile();
-            if (!file) continue;
+        if (!item.type.startsWith('image/')) continue;
+        e.preventDefault();
+        const file = item.getAsFile();
+        if (!file) continue;
 
-            if (file.size > 5 * 1024 * 1024) {
-                showToast('❌ La imagen es demasiado grande (máx 5MB)', 'error');
-                return;
-            }
-
-            const sendingIndicator = document.getElementById('sendingIndicator');
-            if (sendingIndicator) sendingIndicator.classList.remove('hidden');
-
-            try {
-                const base64Image = await fileToBase64(file);
-
-                if (socket && socket.connected) {
-                    socket.emit('send_message', {
-                        content: base64Image,
-                        receiverId: selectedUserId,
-                        type: 'image'
-                    });
-
-                    const tempMessage = {
-                        id: 'temp-image-' + Date.now(),
-                        senderId: currentAdmin.userId,
-                        senderUsername: currentAdmin.username,
-                        senderRole: 'admin',
-                        content: base64Image,
-                        timestamp: new Date(),
-                        type: 'image'
-                    };
-                    addMessageToChat(tempMessage, true);
-                    scrollToBottom();
-
-                    sendPushNotification(selectedUserId, { type: 'image', content: '📸 Imagen' });
-                    showToast('✅ Imagen enviada', 'success');
-                } else {
-                    const response = await fetch(`${API_URL}/api/messages/send`, {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                            'Authorization': `Bearer ${currentToken}`
-                        },
-                        body: JSON.stringify({ content: base64Image, receiverId: selectedUserId, type: 'image' })
-                    });
-                    if (!response.ok) throw new Error('Failed to send image');
-                    showToast('✅ Imagen enviada', 'success');
-                    loadMessages(selectedUserId, true);
-                }
-            } catch (error) {
-                console.error('Error sending pasted image:', error);
-                showToast('❌ Error al enviar imagen', 'error');
-            } finally {
-                if (sendingIndicator) sendingIndicator.classList.add('hidden');
-            }
-            break; // Solo procesar la primera imagen
+        if (file.size > 30 * 1024 * 1024) {
+            showToast('❌ La imagen es muy grande (máx 30 MB)', 'error');
+            return;
         }
+
+        const tempId = 'temp-image-' + Date.now();
+        const sendingIndicator = document.getElementById('sendingIndicator');
+        if (sendingIndicator) sendingIndicator.classList.remove('hidden');
+
+        try {
+            const dataUrl = await compressImageFile(file);
+
+            const tempMessage = {
+                id: tempId,
+                senderId: currentAdmin.userId,
+                senderUsername: currentAdmin.username,
+                senderRole: 'admin',
+                content: dataUrl,
+                timestamp: new Date(),
+                type: 'image'
+            };
+            addMessageToChat(tempMessage, true);
+            scrollToBottom();
+
+            if (socket && socket.connected) {
+                socket.emit('send_message', {
+                    content: dataUrl,
+                    receiverId: selectedUserId,
+                    type: 'image'
+                });
+
+                sendPushNotification(selectedUserId, { type: 'image', content: '📸 Imagen' });
+                showToast('✅ Imagen enviada', 'success');
+            } else {
+                const response = await fetch(`${API_URL}/api/messages/send`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${currentToken}`
+                    },
+                    body: JSON.stringify({ content: dataUrl, receiverId: selectedUserId, type: 'image' })
+                });
+                if (!response.ok) {
+                    removeTempMessageEl(tempId);
+                    const errMsg = await parseFetchError(response, 'No se pudo enviar imagen');
+                    showToast(`❌ 📸 Imagen: ${errMsg}`, 'error');
+                    return;
+                }
+                showToast('✅ Imagen enviada', 'success');
+                loadMessages(selectedUserId, true);
+            }
+        } catch (error) {
+            console.error('Error sending pasted image:', error);
+            removeTempMessageEl(tempId);
+            showToast('❌ Error al enviar imagen', 'error');
+        } finally {
+            if (sendingIndicator) sendingIndicator.classList.add('hidden');
+        }
+        break;
     }
 }
 
